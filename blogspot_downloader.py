@@ -35,66 +35,46 @@ import sys, os, re, time, datetime
 import readline #https://stackoverflow.com/questions/56274748/how-to-navigate-the-text-cursor-in-pythons-input-prompt-with-arrow-keys
 from dateutil import parser as date_parser #need `as` or else conflict name with ArgumentParser
 import unicodedata
-#import pkgutil #I think it should be the responsible of pypub/__init__.py, not this file even it can fix
-#sys.path.append(os.path.dirname(pkgutil.get_loader("pypub").get_filename()))
 import feedparser #for rss feed mode
 import pdfkit #for pdf #also need `sudo apt install wkhtmltopdf`
-PY3 = sys.version_info[0] >= 3
-if PY3:
-    from urllib.request import urlopen
-    from urllib.error import HTTPError
-    from urllib.parse import urlparse
-    import urllib.request
-    def unicode(mystr): #python3
-        return mystr
-    import html
-    from bs4 import BeautifulSoup, SoupStrainer #python3 #python2 also got, and python need use this or else error when `soup = BeautifulSoup(r, "lxml")` 
-else:
-    from urllib2 import urlopen, HTTPError
-    import urllib2
-    from urlparse import urlparse
-    input = raw_input
-    from HTMLParser import HTMLParser
-    html_parser = HTMLParser() #again, don't conflict name with other vars "parser"
-    from BeautifulSoup import BeautifulSoup, SoupStrainer #python2
-#import weasyprint #incomplete, so don't use
+from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.parse import urlparse
+import urllib.request
+import html
+from bs4 import BeautifulSoup, SoupStrainer
 import argparse
+import locale, contextlib
+import tempfile
+
 parser = argparse.ArgumentParser(description='Blogspot Downloader')
 args = ""
+
+def unicode(mystr): #python3
+    return mystr
+
 def slugify(value):
-    if PY3:
-        value = unicodedata.normalize('NFKD', value)
+    value = unicodedata.normalize('NFKD', value)
     #value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
     #value = unicode(re.sub('[^\w\s-]', ' ', value, re.UNICODE).strip())
-    if args.pdf:
-        value = unicode(re.sub('[-/\s]+', ' ', value, re.UNICODE))
-    else: #pypub always replace dot, so to make duplicated file checking works, need to replace here before feed pypub.
-        value = unicode(re.sub('[-_./\s]+', ' ', value, re.UNICODE))
+    value = unicode(re.sub('[-/\s]+', ' ', value, re.UNICODE))
     return value
-import locale, contextlib
+
 @contextlib.contextmanager
 def setlocale(*args, **kw):
   saved = locale.setlocale(locale.LC_ALL)
   yield locale.setlocale(*args, **kw)
   locale.setlocale(locale.LC_ALL, saved)
 
-if PY3:
-    r1 = '’'; r2 = "“"; r3 = "”"; r4 = '—'; r5 = '–'; r6 = '…'; r7 = '®'
-else:
-    r1 = '’'.decode('utf-8'); r2 = "“".decode('utf-8'); r3 = "”".decode('utf-8'); r4 = '—'.decode('utf-8'); r5 = '–'.decode('utf-8'); r6 = '…'.decode('utf-8'); r7 = '®'.decode('utf-8')
-
-#import html #cgi.escape deprecated since py 3.2 , https://docs.python.org/3/whatsnew/3.8.html#api-and-feature-removals
+r1 = '’'; r2 = "“"; r3 = "”"; r4 = '—'; r5 = '–'; r6 = '…'; r7 = '®'
 
 def replacer(s):
     s = s.replace('\\x26', "&")
-    if PY3:
-        s = html.unescape(s)
-    else:
-        s = html_parser.unescape(s)
+    s = html.unescape(s)
     return s.replace(r1, "'").replace(r2, '"').replace(r3, '"').replace(r4, '--').replace(r5, '-').replace(r6, '...').replace(r7, '(R)').replace('& ', '&amp;') #put \x26 first, and \x26amp; and \x26#39; means & and ' respectively
 
 temp_dir_ext = ".blogspot-downloader.temp"
-import tempfile
+
 sys_tmp_dir = tempfile.gettempdir()
 def rm_tmp_files():
     #this is simply remove tmp trash files in /tmp/, and also need clean_up() to remove custom temp dir(set in epub_dir when invoke pypub.Epub(fname, epub_dir=fname+temp_dir_ext) or else pypub module use tempfile.mkdtemp() which doesn't clean up unless reboot), and /tmp/ might got limit also.
@@ -121,7 +101,6 @@ def parse_locale(s):
             return date_parser.parse(s).strftime('%B %d, %Y, %H:%M %p')
     except locale.Error as e:
         print('\nPlease provide enabled locale alias in your system, e.g. zh_CN.UTF-8. In Linux, you may comment out desired locale in /etc/locale.gen file and then run `sudo locale-gen` to enable it\n')
-        clean_up() 
         sys.exit(-1)
 
 def process_url(url):
@@ -150,27 +129,12 @@ def print_rss_err():
 #only epub, don't put it in pdf, it will causes image not appear
 img_css_style='<style>img { display: block; padding: 5px; max-height: 100%; max-width: 100%;}</style>' 
 
-def import_pypub():
-    global pypub
-    try:
-        import pypub #for epub
-    except ImportError:
-        traceback.print_exc()
-        print("\ncurrently epub not support in python 3, please run as python2 OR supply -p option to download as pdf\n")
-        clean_up()
-        sys.exit(-1)
-
-epub_dir = ""
 download_once = False #if want support interactive, then need to changed this logic
 init_url_once = False
 def download(url, h, d_name, ext):
         global download_once
         global init_url_once
         global img_css_style
-        global my_epub
-        global epub_dir
-        if not args.pdf:
-            import_pypub()
 
         #e.g. 'https://diannaoxiaobai.blogspot.com/?action=getTitles&widgetId=BlogArchive1&widgetType=BlogArchive&responseType=js&path=https://diannaoxiaobai.blogspot.com/2018/'
         visit_link = url
@@ -182,10 +146,8 @@ def download(url, h, d_name, ext):
                 r = urlopen(y_url).read()
             except HTTPError as he:
                 print('\nNote that -a -s only allow if url has /year/[month] format, pls check your url\n')
-                clean_up()
                 os._exit(1)
-            if PY3:
-                r = r.decode('utf-8')
+            r = r.decode('utf-8')
             t = r.split("'title'")
             t = t[1:]
         else:
@@ -203,16 +165,11 @@ def download(url, h, d_name, ext):
                 try:
                     print("Try to scrape rss feed url automatically ... " + orig_url)
                     ##r = urlopen(orig_url).read() #https://medium.com/bugbountywriteup got check UA if urllib2 UA then not authorized
-                    if PY3:
-                        req = urllib.request.Request(orig_url, data=None, headers={ 'User-Agent': UA })
-                        r = urllib.request.urlopen(req).read()
-                    else:
-                        req = urllib2.Request(orig_url, headers={ 'User-Agent': UA })
-                        r = urllib2.urlopen(req).read()
+                    req = urllib.request.Request(orig_url, data=None, headers={ 'User-Agent': UA })
+                    r = urllib.request.urlopen(req).read()
                 except Exception as e:
                     print(e)
                     print("Request webpage failed, please check your network OR authorized to access that url.")
-                    clean_up()
                     os._exit(1) #don't use sys.exit(-1) if don't want to traceback to main() to print exception
                 soup = BeautifulSoup(r, "lxml")
                 data = soup.findAll('link', attrs={'type':'application/rss+xml'})
@@ -285,10 +242,7 @@ def download(url, h, d_name, ext):
                 t_date = ''
                 try:
                     if args.locale:
-                        if PY3:
-                            t_date = parse_locale(post_date)
-                        else:
-                            t_date = parse_locale(post_date).decode('utf-8')
+                        t_date = parse_locale(post_date)
                     else:
                         t_date = date_parser.parse(post_date).strftime('%B %d, %Y, %H:%M %p')
                 except ValueError: #Unknown string format, e.g. https://www.xul.fr/en-xml-rss.html got random date format such as 'Wed, 29 Jul 09 15:56:54  0200'
@@ -298,11 +252,10 @@ def download(url, h, d_name, ext):
                         visit_link = feed_links['href']
                 title_raw = tt['title'].strip()
                 title_pad = title_raw + ' '
-                if (not args.pdf) or (not tt['title']): #epub got problem copy link from text, so epub always shows link
+                if not tt['title']: #epub got problem copy link from text, so epub always shows link
                     tt['title'] = visit_link
                     title_is_link = True
-                if args.pdf: #pdf with img css causes image not appear at all
-                    img_css_style = ''
+                img_css_style = ''
 
                 author = tt.get('author_detail', {}).get('name')
                 if not author:
@@ -330,18 +283,9 @@ def download(url, h, d_name, ext):
                     print(e)
                     print('parse media error')
 
-                #pdfkit need specific charset, epub seems no need
-                if args.pdf: #just now got 1 post shows blank but got div in feed, then noticed it's white color font, lol
-                    h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<div class="separator"', '<div class="separator" align="center" ') + media_content + '</div></body>'
-                    #h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<br /><br /><br />', '<br />') + media_content + '</div></body>'
-                else: #epub can't set body/head
-                    #h_soup = BeautifulSoup(tt['summary'], "lxml")
-                    #for pre in h_soup.find_all('pre'):
-                    #    print("pre: ", pre)
-                    #h = h + '<div align="center">' + tt['summary'].replace('<div class="separator"', '<div class="separator" align="center" ') + media_content + "</div>" #no need do replace anymore since the align center should control by global <div>
-                    h = h + '<div align="center">' + tt['summary'].replace('<br /><br /><br />', '<br />') + media_content + "</div>"
-                    #h = h + '<div align="center">' + tt['summary'] + media_content + "</div>"
-                    #h = h + tt['summary'] + media_content
+                h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<div class="separator"', '<div class="separator" align="center" ') + media_content + '</div></body>'
+                #h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<br /><br /><br />', '<br />') + media_content + '</div></body>'
+
                 title = tt['title']
                 t_url = visit_link
             else:
@@ -356,134 +300,51 @@ def download(url, h, d_name, ext):
             else:
                 print(t_url)
 
-            if args.pdf:
-                print('Download html as PDF, please be patient...' + str(count) + '/' + str(len(t)))
-            else:
-                if not args.log_link_only:
-                    print('Download html as EPUB, please be patient...' + str(count) + '/' + str(len(t)))
-            if args.pdf:
-                if title_is_link: #else just leave slash with empty
-                    title = '/'.join(title.split('/')[-3:])
-                if PY3:
-                    fname = os.path.join( d_name, slugify(unicode(title)) )
-                else:
-                    print(title)
-                    try:
-                        title = title.decode('utf-8')
-                    except:
-                        pass #print('calm down, is normal decode error')
-                    title = replacer(title)
-                    #fname = os.path.join( d_name, slugify(title.decode('utf-8')))
-                    fname = os.path.join( d_name, slugify(title))
-            else: #no point do set fname based on title since epub is single file only with multiple chapters
-                fname = d_name
-            fpath = os.path.join( os.getcwd(), fname )
-            if args.pdf:
-                check_path = os.path.join( fpath + ext )
-            else:
-                check_path = fpath[:-1] + ext
-            if (not download_once) and os.path.exists( check_path ):
-                if args.pdf:
-                    fpath = fpath + '_' + str(int(time.time())) + ext
-                else:
-                    fname = fname[:-1] + ' ' + str(int(time.time())) #pypub truncated _, so can't use '_'
-            else:
-                if args.pdf:
-                    fpath+=ext
-                else:
-                    fpath = fpath[:-1] + ext
-                    fname = fname[:-1]
-            if args.pdf:
-                print("file path: " + fpath)
-                #pdf = weasyprint.HTML(t_url).write_pdf()
-                #file( d_name + "/" + slugify(unicode(title)) + ".pdf", 'w' ).write(pdf)
-                if args.all:
-                    try:
-                        pdfkit.from_url(t_url, fpath)
-                    except IOError as ioe:
-                        print("pdfkit IOError")
-                else:
-                    try:
-                        #https://security.googleblog.com/2013/10/dont-mess-with-my-browser.html site can't open in kchmviewer bcoz of this
-                        #, which you direct unzip .EPUB and open that xhtml will got error
-                        #-f 'https://security.googleblog.com/feeds/posts/default?start-index=179&max-results=1' direct jump to desired index to test
-                        #rf: https://www.w3.org/wiki/Common_HTML_entities_used_for_typography
-                        #narrow down OEBPS/toc.nc by removing list of items, then download by index+repack+<open_in_web_browser_OR_kchmviewer> above to know which portion of items trigger the xml error #got case toc.nc itself contains '&' which must replace with `&amp;`
-                        h = replacer(h)
-                        pdfkit.from_string(h, fpath)
-                    except IOError as ioe:
-                        print('Exception IOError: ' + repr(ioe))
-            else:
-                if not download_once:
-                    download_once = True
-                    if not args.log_link_only:
-                        print("file path: " + fpath)
-                    if os.path.exists(fname+temp_dir_ext):
-                        print(fname+temp_dir_ext + " already exists, please move/backup that direcory to another place manually. Abort")#to not blindly replace file
-                        os._exit(1)
-                    tmp_dir = fname+temp_dir_ext
-                    my_epub = pypub.Epub(fname, epub_dir=tmp_dir)
-                    epub_dir = os.path.join( os.getcwd(), tmp_dir )
-                    if not args.log_link_only:
-                        print("epub_dir: " + epub_dir)
-                if title_raw:
-                    try:
-                        title = title.decode('utf-8')
-                    except:
-                        pass
-                    try: #fixed -as http://miniechung1998.blogspot.com/2012/12/xd-xd.html
-                        title_raw = title_raw.decode('utf-8')
-                    except:
-                        pass
-                    title_raw = replacer(title_raw).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') #unlike content, title can replace '&'(no space) like that since & may no space
-                    #, if content do like that will got no image, got visible &nbsp; text ...etc
-                if args.all:
-                    if title_raw:
-                        my_chapter = pypub.create_chapter_from_url(title=title_raw, url=t_url)
-                    else: #no choice like that and better not set with t_url, use other editor if kchmviewer error, should unlikely happen though
-                        my_chapter = pypub.create_chapter_from_url(t_url)
-                    #print(my_chapter.content)
-                    #my_chapter.content = replacer(my_chapter.content)
-                    my_chapter.title = replacer(my_chapter.title)
-                    #sigil viewer will warning and auto convert for you, e.g. /<img> become </>, replace <!DOCTYPE html> to <?xml version="1.0" encoding="utf-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">, Add  <title></title> ...etc, this is normal and shouldn't have extra work to do, while kchmviewer able to render it without error.
-                    #try:
-                    #    my_chapter.content = my_chapter.content.decode('utf-8')
-                    #except:
-                    #    pass #print("decode content err")
-                    #
-                    # The correct way to replace, you can't direct `my_chapter.content = 'xxx'` and expect it take effect !
-                    #my_chapter._content_tree = BeautifulSoup(my_chapter.content, 'html.parser')
+            print('Download html as PDF, please be patient...' + str(count) + '/' + str(len(t)))
 
-                    try:
-                        my_chapter.title = my_chapter.title.decode('utf-8')
-                    except: #-a http://cuhkt48.blogspot.com/2016/07/blog-post.html
-                        pass #print("decode title err")
-                else:
-                    #h = replacer(h) #'https://www.blogger.com/feeds/1176949257541686127/posts/default?start-index=251&max-results=25' -> https://security.googleblog.com/2009/03/reducing-xss-by-way-of-automatic.html got <prev> and body, so don't blindly unescape all #might need filter by pre and allow other to replace, need to test more to know got error or not without replace
-                    if title_raw:
-                        my_chapter = pypub.create_chapter_from_string(h, title=title_raw, url=t_url)
-                    else:
-                        my_chapter = pypub.create_chapter_from_string(h, title='/'.join(title.split('/')[-3:]), url=t_url)
-                    #print(my_chapter.content)
-                    #my_chapter = pypub.create_chapter_from_string(r['entries'][0]['summary'].replace('<div class="separator"', '<div class="separator" align="center" '))
-                my_epub.add_chapter(my_chapter)
-                my_epub.create_epub(os.getcwd())
-                rm_tmp_files()
+            if title_is_link: #else just leave slash with empty
+                title = '/'.join(title.split('/')[-3:])
+            fname = os.path.join( d_name, slugify(unicode(title)) )
+            title = replacer(title)
+            #fname = os.path.join( d_name, slugify(title.decode('utf-8')))
+            fname = os.path.join( d_name, slugify(title))
+
+            fpath = os.path.join( os.getcwd(), fname )
+            check_path = os.path.join( fpath + ext )
+
+            if (not download_once) and os.path.exists( check_path ):
+                fpath = fpath + '_' + str(int(time.time())) + ext
+            else:
+                fpath+=ext
+
+            print("file path: " + fpath)
+            #pdf = weasyprint.HTML(t_url).write_pdf()
+            #file( d_name + "/" + slugify(unicode(title)) + ".pdf", 'w' ).write(pdf)
+            if args.all:
+                try:
+                    pdfkit.from_url(t_url, fpath)
+                except IOError as ioe:
+                    print("pdfkit IOError")
+            else:
+                try:
+                    #https://security.googleblog.com/2013/10/dont-mess-with-my-browser.html site can't open in kchmviewer bcoz of this
+                    #, which you direct unzip .EPUB and open that xhtml will got error
+                    #-f 'https://security.googleblog.com/feeds/posts/default?start-index=179&max-results=1' direct jump to desired index to test
+                    #rf: https://www.w3.org/wiki/Common_HTML_entities_used_for_typography
+                    #narrow down OEBPS/toc.nc by removing list of items, then download by index+repack+<open_in_web_browser_OR_kchmviewer> above to know which portion of items trigger the xml error #got case toc.nc itself contains '&' which must replace with `&amp;`
+                    h = replacer(h)
+                    pdfkit.from_string(h, fpath)
+                except IOError as ioe:
+                    print('Exception IOError: ' + repr(ioe))
         return url #return value used for rss feed mode only
 
 def scrape(url, d_name, ext):
     try:
-        #r = urlopen(url).read()
-        if PY3:
-            req = urllib.request.Request(url, data=None, headers={ 'User-Agent': UA })
-            r = urllib.request.urlopen(req).read()
-        else:
-            req = urllib2.Request(url, headers={ 'User-Agent': UA })
-            r = urllib2.urlopen(req).read()
+        req = urllib.request.Request(url, data=None, headers={ 'User-Agent': UA })
+        r = urllib.request.urlopen(req).read()
     except Exception as e:
         print(e)
         print("Please check your network OR url.")
-        clean_up()
         os._exit(1)
     soup = BeautifulSoup(r, "lxml")
     case = 0
@@ -512,22 +373,6 @@ def scrape(url, d_name, ext):
             else:
                 download(url, h, d_name, ext)
 
-def clean_up():
-    global epub_dir
-    try:
-        #traceback.print_exc()
-        if (not args.pdf) and epub_dir:
-            #print("Remove temp files")
-            rm_tmp_files()
-            temp_dir = os.path.join( os.getcwd(), epub_dir )
-            if os.path.isdir(temp_dir): #may no temp dir if no images in feed
-                shutil.rmtree( temp_dir )
-            #print("Removed temp dir successfully -1")
-    except Exception as e:
-        #traceback.print_exc()
-        print("Remove temp " + epub_dir + "  dir failed -1, please check if it exist and remove manually.")
-        sys.exit(-1)
-
 def process_url(url):
     if (url.startswith("'") and url.endswith("'")) or (url.startswith('"') and url.endswith('"')):
         url = url[1:-1]
@@ -536,7 +381,6 @@ def process_url(url):
     return url
 
 def main():
-        global epub_dir
         if args.url:
             url = args.url
         else:
@@ -547,107 +391,27 @@ def main():
         parsed_uri = urlparse(url)
         netloc = '{uri.netloc}/'.format(uri=parsed_uri)
         d_name = slugify(unicode(netloc))
-        if args.pdf:
-            if (not args.one) and (not os.path.isdir(d_name)):
-                os.makedirs(d_name)
-            ext = '.pdf'
-        else:
-            ext = '.epub'
+        if (not args.one) and (not os.path.isdir(d_name)):
+            os.makedirs(d_name)
+        ext = '.pdf'
+        
         if args.print_date:
             print('Debugging\n')
             scrape(url, d_name, ext)
         elif args.one:
             d_name = d_name.strip()
-            if args.pdf:
-                fname = d_name + ext
-            else: #.epub will auto suffix
-                fname = d_name + ext
+            fname = d_name + ext
             fpath = os.path.join(os.getcwd(), fname)
             while os.path.exists(fpath):
                  fname = d_name + '_' + str(int(time.time())) + ext
                  fpath = os.path.join(os.getcwd(), fname )
             try:
-                if args.pdf:
-                    # [further:0] 'https://thehackernews.com/2019/09/phpmyadmin-csrf-exploit.html' 
-                    # ... nid -1 -p, can't simply -1
-                    print('Create single pdf: ' + fpath)
-                    # test case(need default 3 seconds): https://www.quora.com/Why-does-the-loopback-interface-on-my-computer-has-65536-as-the-MTU-while-other-interfaces-has-1500-as-the-MTU
-                    pdfkit.from_url(url, fpath, options={'--javascript-delay': args.js_delay*1000})
-                else:
-                    import_pypub()
-                    tmp_dir = d_name+temp_dir_ext
-                    my_epub = pypub.Epub(fname[:-5], epub_dir=tmp_dir)
-                    print('Create single epub: ' + fpath)
-                    while True: 
-                        try:
-                            print('\n[' + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + '] Trying url: ' + url)
-                            epub_dir = os.path.join( os.getcwd(), tmp_dir )
-                            try:
+                # [further:0] 'https://thehackernews.com/2019/09/phpmyadmin-csrf-exploit.html' 
+                # ... nid -1 -p, can't simply -1
+                print('Create single pdf: ' + fpath)
+                # test case(need default 3 seconds): https://www.quora.com/Why-does-the-loopback-interface-on-my-computer-has-65536-as-the-MTU-while-other-interfaces-has-1500-as-the-MTU
+                pdfkit.from_url(url, fpath, options={'--javascript-delay': args.js_delay*1000})
 
-                                '''
-                                import trace
-                                #print("sys path: ", sys.prefix, sys.exec_prefix)
-                                tracer = trace.Trace(
-                                    trace=1,
-                                    #ignoredirs=[sys.prefix, sys.exec_prefix] )
-                                    ignoredirs=[ '/usr/lib/python3/',  '/usr/lib/python3.6/', '/usr/lib/python3.8/',
-                                    '/home/xiaobai/.local/lib/python3.6/site-packages/lxml/', 
-                                     ],
-                                    ignoremods=[ 'version', 'pyparsing', 'six', '_tokenizer', 'serialize', 'exceptions', 'request'
-                                    , '_inputstream', 'etree', 'html5parser', '_structures', 'specifier', 'specifiers', 'serializer'
-                                    , '_utils', '_compat'
-                                    , '_htmlparser', 'element', 'dammit', 'universaldetector', 'codingstatemachine', 'utf8prober'
-                                    , 'enums', 'mbcsgroupprober', 'charsetgroupprober', 'charsetprober', 'latin1prober'
-                                    , 'charsetgroupprober', 'sbcharsetprober', 'hebrewprober', 'euctwprober', 'mbcharsetprober'
-                                    , 'chardistribution', 'sbcsgroupprober', 'jpcntx', 'sjisprober', 'big5prober', 'cp949prober'
-                                    , 'euckrprober', 'gb2312prober', 'eucjpprober', 'timeout', 'pyopenssl', 'SSL', 'poolmanager'
-                                    , 'connectionpool', 'response', '_collections', 'core', 'intranges', 'binding', '_oid', 'x509'
-                                    , 'decode_asn1', 'utils', 'extensions', 'general_name', 'cookies', 'models', 'structures'
-                                    , '_internal_utils', 'sessions', 'adapters', 'hooks', 'retry'
-                                    , 'connection', 'api', 'url', 'ssl_'
-                                    , 'wait', 'crypto', '_util', 'backend', 'makefile'
-                                    ]
-                                    #count=1)
-                                )
-                                '''
-                                #my_chapter = tracer.runfunc(pypub.create_chapter_from_url, url)
-                                my_chapter = pypub.create_chapter_from_url(url)
-
-                                # To replace title contains "&"" to "&amp;" , or else will not able open in kchmviewer
-                                # Test case: https://blog.semmle.com/semmle-discovers-severe-vulnerability-ghostscript-postscript-pdf/
-                                my_chapter.title = my_chapter.html_title
-
-                                my_epub.add_chapter(my_chapter)
-                                my_epub.create_epub(os.getcwd())
-                                rm_tmp_files()
-                            except ValueError as ve: #https://pikachu.com is an invalid url or no network connection
-                                traceback.print_exc()
-                                print(ve)
-                            try:
-                                reply = input('\nPaste next <url> OR type \'n\' to exit: ').strip()
-                            except EOFError: #when use -1 and < list_of_lines_file, last line will raise EOFError
-                                break
-                            if (reply and reply[0].lower() != 'n'):
-                                url = process_url(reply)
-                            else:
-                                break
-                        except IOError as ioe: #should allow next url if requests.get() in pypub's chapter.py timeout
-                            print("\nIOError but still allow goto next chapter", ioe)
-                        except KeyboardInterrupt:
-                            #If you paste all links in once, then this need some time to trigger, but then next url only able to run one url since all the rest url get flush after KeyboardInterrupt, you can just find by url in link page and then copy/paste the remaining urls.
-                            reply = input('\n[' + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + '] [r]etry OR [s]kip to next url OR [q]uit ? [r/s/q] ').strip() #or ctrl+c again also can exit
-                            if reply:
-                                if reply == 's':
-                                    reply = input('\nPaste next <url> OR type \'n\' to exit: ').strip()
-                                    if (reply and reply[0].lower() != 'n'):
-                                        url = process_url(reply)
-                                    else:
-                                        break
-                                elif reply == 'q':
-                                    break
-                                #else #continue/retry
-                            #except Exception, ex:
-                            #    print('single global ex: ' + ex)
             except IOError as ioe:
                 print("IOError --one: ", ioe)
         elif not args.all:
@@ -666,13 +430,11 @@ def main():
             scrape(url, d_name, ext)
         print("\nDone")
 
-if not PY3:
-    sys.exc_clear() #do not produce eception of import part.
+
 if __name__ == "__main__":
     parser.add_argument('-a', '--all', action='store_true', help='Display website mode instead of rss feed mode. Only support blogspot website but you can try your luck in other site too')
     parser.add_argument('-s', '--single', action='store_true', help='Download based on provided url year/month instead of entire blog, will ignored in rss feed mode and --print_date')
     parser.add_argument('-d', '--print_date', action='store_true', help='Print main date info without execute anything')
-    parser.add_argument('-p', '--pdf', action='store_true', help='Output in PDF instead of EPUB but might failed in some layout')
     parser.add_argument('--js-delay', dest='js_delay', type=int, default=3, help='Specify delay seconds for -1 -p to have enough time for Javascript to load. Default is 3 seconds.')
     parser.add_argument('-l', '--locale', help='Date translate to desired locale, e.g. -l zh_CN.UTF-8 will shows date in chinese')
     parser.add_argument('-f', '--feed', help='Direct pass full rss feed url. e.g. python blogspot_downloader.py http://www.ulduzsoft.com/feed/ -f http://www.ulduzsoft.com/feed/. Note that it may not able to get previous rss page in non-blogspot site.') #got case not return code, e.g. http://zoczus.blogspot.com/2015/04/plupload-same-origin-method-execution.html , use -a in this case
@@ -690,17 +452,11 @@ if __name__ == "__main__":
             #traceback.print_exc()
             print(traceback.format_exc())
             print("Exception -2") #this one might not called if ctrl+c inside pypub.create_chapter_from_url's urllib3, so we need another finally to do clean_up 
-        if args:
-            clean_up()
     finally: #https://stackoverflow.com/questions/4606942/why-cant-i-handle-a-keyboardinterrupt-in-python
         #traceback.print_exc() #finally doesn't always means exception, it will run even in normal flow, so no need clean_up in other place
-        if PY3: #temp workaround to suppress none
-            f = open(os.devnull, 'w') #don't print anthing for traceback.print_exc
-            sys.stdout = f
+        #temp workaround to suppress none
+        f = open(os.devnull, 'w') #don't print anthing for traceback.print_exc
+        sys.stdout = f
         if traceback.format_exc() != 'None\n':
             print(traceback.format_exc())
             print("Exception -1")
-        if args:
-            clean_up()
-
-
