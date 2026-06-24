@@ -1,5 +1,5 @@
 import traceback, shutil, resource
-import sys, os, re, time, datetime
+import sys, os, re, time, datetime, mimetypes
 import readline #https://stackoverflow.com/questions/56274748/how-to-navigate-the-text-cursor-in-pythons-input-prompt-with-arrow-keys
 from dateutil import parser as date_parser #need `as` or else conflict name with ArgumentParser
 import unicodedata
@@ -34,14 +34,14 @@ init_url_once = False
 
 @contextlib.contextmanager
 def setlocale(*args, **kw):
-  saved = locale.setlocale(locale.LC_ALL)
-  yield locale.setlocale(*args, **kw)
-  locale.setlocale(locale.LC_ALL, saved)
+    saved = locale.setlocale(locale.LC_ALL)
+    yield locale.setlocale(*args, **kw)
+    locale.setlocale(locale.LC_ALL, saved)
 
 def slugify(value):
-    value = unicodedata.normalize('NFKD', value)
-    value = re.sub('[-/\s]+', ' ', value, re.UNICODE)
-    return value
+    value = unicodedata.normalize('NFC', value)
+    value = re.sub('[-/\\s]+', ' ', value, flags=re.UNICODE)
+    return value.strip()
 
 def replacer(s):
     s = s.replace('\\x26', "&")
@@ -49,6 +49,62 @@ def replacer(s):
     for u,v in zip(['’', "“", "”", '—', '–', '…', '®', '&'], ["'", '"', '"', '--', '-', '...', '(R)', '&amp;']):
         s = s.replace(u,v)
     return s
+
+def looks_like_image_url(u):
+    path = urlparse(u).path.lower()
+    return path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg')) \
+        or ('googleusercontent.com' in u) or ('bp.blogspot.com' in u)
+
+def upgrade_blogspot_image_url(u):
+    #blogspot/blogger images embed a size token; rewrite it to the original (s0)
+    if ('googleusercontent.com' in u) or ('blogspot.com' in u) or ('blogger.com' in u):
+        u = re.sub(r'/s\d+(-c)?/', '/s0/', u)
+        u = re.sub(r'/w\d+-h\d+(-[a-z]+)?/', '/s0/', u)
+        u = re.sub(r'=s\d+(-c)?(?=$|\?|&)', '=s0', u)
+        u = re.sub(r'=w\d+-h\d+(-[a-z]+)?(?=$|\?|&)', '=s0', u)
+    return u
+
+def download_image(url, dest_dir, idx):
+    if url.startswith('//'): #protocol-relative url
+        url = 'https:' + url
+    try:
+        req = urllib.request.Request(url, data=None, headers={'User-Agent': UA})
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+            ctype = resp.headers.get('Content-Type', '')
+    except Exception as e:
+        print('Failed to download image: ' + url + ' (' + repr(e) + ')')
+        return
+    base = os.path.basename(urlparse(url).path) or 'image'
+    name = '{:02d}_{}'.format(idx, base)
+    if not os.path.splitext(name)[1]:
+        name += mimetypes.guess_extension(ctype.split(';')[0].strip()) or '.jpg'
+    try:
+        with open(os.path.join(dest_dir, name), 'wb') as f:
+            f.write(data)
+    except OSError as e:
+        print('Failed to save image: ' + name + ' (' + repr(e) + ')')
+
+def save_post_images(post_html, dest_dir):
+    #parse the post html (BEFORE replacer() mangles & in urls) and save every
+    #image full-size; prefer the enclosing <a href> link when it is an image
+    soup = BeautifulSoup(post_html, "lxml")
+    seen = set()
+    idx = 0
+    for img in soup.find_all('img'):
+        src = img.get('src')
+        if not src:
+            continue
+        candidate = src
+        link = img.find_parent('a')
+        if link and link.get('href') and looks_like_image_url(link.get('href')):
+            candidate = link.get('href')
+        candidate = upgrade_blogspot_image_url(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        idx += 1
+        download_image(candidate, dest_dir, idx)
 
 def rm_tmp_files():
     for root, dirs, files in os.walk(sys_tmp_dir):
@@ -86,9 +142,6 @@ def process_rss_link(url):
         url+='&start-index=1&max-results=25'
     return url.replace('&alt=rss', '').replace('?alt=rss', '?').replace('?&', '?') #to prevent no next rss page link
 
-
-def print_rss_err():
-    print('\nSeems like no permission to access rss feed, consider use -a OR -1 option to scrape in web mode. Or check your url typo OR network. Tip: you may lucky to find feed url by right-click on the webpage and choose "View Page Source", then search for "rss" keyword\n')
 
 def download(url, h, d_name, ext):
     global download_once
@@ -131,11 +184,11 @@ def download(url, h, d_name, ext):
                 print("Request webpage failed, please check your network OR authorized to access that url.")
                 os._exit(1) #don't use sys.exit(-1) if don't want to traceback to main() to print exception
             soup = BeautifulSoup(r, "lxml")
-            data = soup.findAll('link', attrs={'type':'application/rss+xml'})
+            data = soup.find_all('link', attrs={'type':'application/rss+xml'})
             if not data: #https://github.com/RSS-Bridge/rss-bridge/issues/566 only has atom
-                data = soup.findAll('link', attrs={'type':'application/atom+xml'})
+                data = soup.find_all('link', attrs={'type':'application/atom+xml'})
             if not data: 
-                data = soup.findAll('a', attrs={'href':'/rss/'}) #https://blog.google/products/
+                data = soup.find_all('a', attrs={'href':'/rss/'}) #https://blog.google/products/
             if data:
                 url = data[0].get("href")
                 url = process_rss_link(url)
@@ -186,7 +239,7 @@ def download(url, h, d_name, ext):
                 url = ''
         elif not t: #no need care if next page rss index suddenly change and no content case
             url = ''
-            print_rss_err()
+            print('\nSeems like no permission to access rss feed, consider use -a OR -1 option to scrape in web mode. Or check your url typo OR network. Tip: you may lucky to find feed url by right-click on the webpage and choose "View Page Source", then search for "rss" keyword\n')
             
     count = 0
     for tt in t:
@@ -206,6 +259,10 @@ def download(url, h, d_name, ext):
                     t_date = date_parser.parse(post_date).strftime('%B %d, %Y, %H:%M %p')
             except ValueError: #Unknown string format, e.g. https://www.xul.fr/en-xml-rss.html got random date format such as 'Wed, 29 Jul 09 15:56:54  0200'
                 t_date = post_date
+            try: #sortable, filesystem-safe stamp for the per-post subfolder name
+                post_dt_str = date_parser.parse(post_date).strftime('%Y-%m-%d_%H%M%S')
+            except (ValueError, TypeError):
+                post_dt_str = str(int(time.time()))
             for feed_links in tt['links']:
                 if feed_links['rel'] == 'alternate':
                     visit_link = feed_links['href']
@@ -214,6 +271,18 @@ def download(url, h, d_name, ext):
             if not tt['title']: #epub got problem copy link from text, so epub always shows link
                 tt['title'] = visit_link
                 title_is_link = True
+
+            #compute the would-be post folder and skip BEFORE any html parsing/building,
+            #so an already-downloaded post is never re-fetched nor duplicated. mirrors the
+            #title->slug logic below (lines title_is_link / replacer / slugify).
+            early_title = '/'.join(tt['title'].split('/')[-3:]) if title_is_link else tt['title']
+            early_slug = slugify(replacer(early_title)).strip()[:120]
+            post_dir = os.path.join( os.getcwd(), d_name, (post_dt_str + '_' + early_slug).strip() )
+            print(post_dir)
+            if os.path.exists( post_dir ): #already downloaded
+                print('Folder already exists, skipping post: ' + post_dir)
+                continue
+
             img_css_style = ''
 
             author = tt.get('author_detail', {}).get('name')
@@ -230,20 +299,11 @@ def download(url, h, d_name, ext):
                        #pitfall: python 3 dict no has_key() attr
                         if ('medium' in tm) and (tm['medium'] == 'image') and 'url' in tm:
                             media_content += '<img src="' + tm['url'] + '" >'
-                            #media_content += '<img style="display: block; max-height: 100%; max-width: 100%" src="' + tm['url'] + '" >'
-                #[UPDATE] shouldn't do like that, since thumbnails of feeds normally duplicated with feed without media_content
-                #... which seems act as single thumbnail on webpage scraping metadata usage only.
-                #... and seems like https://gigaom.com/feed/ thumbnail is not showing in webpage.
-                #elif 'media_thumbnail' in tt: #https://gigaom.com/feed/ only has thumbnail
-                #    for tm in tt['media_thumbnail']:
-                #        if 'url' in tm:
-                #            media_content += '<img src="' + tm['url'] + '" >'
             except Exception as e:
                 print(e)
                 print('parse media error')
 
-            h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<div class="separator"', '<div class="separator" align="center" ') + media_content + '</div></body>'
-            #h = '<head><meta charset="UTF-8"></head><body><div align="center">' + h + tt['summary'].replace('<br /><br /><br />', '<br />') + media_content + '</div></body>'
+            h = '<head><meta charset="UTF-8"></head><body><div align="left">' + h + tt['summary'].replace('<div class="separator"', '<div class="separator" align="left" ') + media_content + '</div></body>'
 
             title = tt['title']
             t_url = visit_link
@@ -264,29 +324,41 @@ def download(url, h, d_name, ext):
         if title_is_link: #else just leave slash with empty
             title = '/'.join(title.split('/')[-3:])
 
-        fname = os.path.join( d_name, slugify(title) )
         title = replacer(title)
-        #fname = os.path.join( d_name, slugify(title.decode('utf-8')))
-        fname = os.path.join( d_name, slugify(title))
+        slug = slugify(title).strip()[:120] #cap to stay within filename limits
 
-        fpath = os.path.join( os.getcwd(), fname )
-        check_path = os.path.join( fpath + ext )
-
-        if (not download_once) and os.path.exists( check_path ):
-            fpath = fpath + '_' + str(int(time.time())) + ext
-        else:
-            fpath += ext
-
-        print("file path: " + fpath)
         if args.all:
+            fname = os.path.join( d_name, slug )
+            fpath = os.path.join( os.getcwd(), fname )
+            check_path = os.path.join( fpath + ext )
+
+            if (not download_once) and os.path.exists( check_path ):
+                fpath = fpath + '_' + str(int(time.time())) + ext
+            else:
+                fpath += ext
+
+            print("file path: " + fpath)
             try:
                 pdfkit.from_url(t_url, fpath)
             except IOError as ioe:
                 print("pdfkit IOError")
         else:
+            #each post gets its own date/time-stamped subfolder, holding the PDF
+            #(images embedded as before) plus every image saved separately full-size.
+            #post_dir was computed and existence-checked above, before any parsing.
+            os.makedirs( post_dir, exist_ok=True )
+
+            if args.save_images: #opt-in via -i, off by default
+                save_post_images(h, post_dir) #parse pre-replacer h for correct urls
+
+            post_html = replacer(h) #same html that goes into the pdf
+            with open(os.path.join( post_dir, 'index.html' ), 'w', encoding='utf-8') as f:
+                f.write(post_html)
+
+            fpath = os.path.join( post_dir, slug + ext )
+            print("file path: " + fpath)
             try:
-                h = replacer(h)
-                pdfkit.from_string(h, fpath)
+                pdfkit.from_string(post_html, fpath)
             except IOError as ioe:
                 print('Exception IOError: ' + repr(ioe))
     return url #return value used for rss feed mode only
@@ -301,10 +373,10 @@ def scrape(url, d_name, ext):
         os._exit(1)
     soup = BeautifulSoup(r, "lxml")
     case = 0
-    data = soup.findAll('a',attrs={'class':'post-count-link'})
+    data = soup.find_all('a',attrs={'class':'post-count-link'})
     if not len(data):
         case = 1
-        data = soup.findAll('li',attrs={'class':'archivedate'})
+        data = soup.find_all('li',attrs={'class':'archivedate'})
     year_l = []
     if len(data) == 0:
         print('\nNo data found. You may check your url OR try -f <rss feed url> OR remove -a instead. Also do not use -a if -f added.\n')
@@ -389,6 +461,7 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--feed', help='Direct pass full rss feed url. e.g. python blogspot_downloader.py http://www.ulduzsoft.com/feed/ -f http://www.ulduzsoft.com/feed/. Note that it may not able to get previous rss page in non-blogspot site.') #got case not return code, e.g. http://zoczus.blogspot.com/2015/04/plupload-same-origin-method-execution.html , use -a in this case
     parser.add_argument('-1', '--one', action='store_true', help='Scrape url of ANY webpage as single pdf(-p) or epub')
     parser.add_argument('-lo', '--log-link-only', dest='log_link_only', action='store_true', help='print link only log for -f feed, temporary workaround to copy into -1, in case -f feed only retrieve summary.')
+    parser.add_argument('-i', '--save-images', dest='save_images', action='store_true', help='In rss feed mode, also download every post image full-size into the post subfolder. Off by default.')
     parser.add_argument('url', nargs='?', help='Blogspot url') #must add nargs='?' or else always need url but -f shouldn't need
     args, remaining  = parser.parse_known_args() #don't use normal parse_args() which can't ignore above url
     
