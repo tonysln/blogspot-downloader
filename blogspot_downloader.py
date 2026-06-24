@@ -7,7 +7,7 @@ import feedparser #for rss feed mode
 import pdfkit #for pdf #also need `sudo apt install wkhtmltopdf`
 from urllib.request import urlopen
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import urllib.request
 import html
 from bs4 import BeautifulSoup, SoupStrainer
@@ -91,7 +91,10 @@ def download_image(url, dest_dir, idx, _depth=0):
                 return download_image(inner_src, dest_dir, idx, _depth + 1)
         print('Skipping non-image (HTML) response for image: ' + url)
         return
-    base = os.path.basename(urlparse(url).path) or 'image'
+    #url path keeps percent-encoding, so brackets etc. arrive as %5B/%5D; decode
+    #them so the saved file uses the same literal characters as the source name
+    #(then drop any path separators a decode might surface, e.g. %2F -> /).
+    base = unquote(os.path.basename(urlparse(url).path)).replace('/', '_') or 'image'
     name = '{:02d}_{}'.format(idx, base)
     if not os.path.splitext(name)[1]:
         name += mimetypes.guess_extension(ctype.split(';')[0].strip()) or '.jpg'
