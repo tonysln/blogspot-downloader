@@ -56,15 +56,18 @@ def looks_like_image_url(u):
         or ('googleusercontent.com' in u) or ('bp.blogspot.com' in u)
 
 def upgrade_blogspot_image_url(u):
-    #blogspot/blogger images embed a size token; rewrite it to the original (s0)
+    #blogspot/blogger images embed a size token; rewrite it to the original (s0).
+    #the size token may carry one or more letter suffixes, e.g. -c (crop) or -h
+    #(an HTML wrapper page, used by old pre-2011 posts). we must strip them all,
+    #otherwise /s1600-h/ returns a 388-byte HTML stub instead of the image binary.
     if ('googleusercontent.com' in u) or ('blogspot.com' in u) or ('blogger.com' in u):
-        u = re.sub(r'/s\d+(-c)?/', '/s0/', u)
-        u = re.sub(r'/w\d+-h\d+(-[a-z]+)?/', '/s0/', u)
-        u = re.sub(r'=s\d+(-c)?(?=$|\?|&)', '=s0', u)
-        u = re.sub(r'=w\d+-h\d+(-[a-z]+)?(?=$|\?|&)', '=s0', u)
+        u = re.sub(r'/s\d+(-[a-z]+)*/', '/s0/', u)
+        u = re.sub(r'/w\d+-h\d+(-[a-z]+)*/', '/s0/', u)
+        u = re.sub(r'=s\d+(-[a-z]+)*(?=$|\?|&)', '=s0', u)
+        u = re.sub(r'=w\d+-h\d+(-[a-z]+)*(?=$|\?|&)', '=s0', u)
     return u
 
-def download_image(url, dest_dir, idx):
+def download_image(url, dest_dir, idx, _depth=0):
     if url.startswith('//'): #protocol-relative url
         url = 'https:' + url
     try:
@@ -74,6 +77,19 @@ def download_image(url, dest_dir, idx):
             ctype = resp.headers.get('Content-Type', '')
     except Exception as e:
         print('Failed to download image: ' + url + ' (' + repr(e) + ')')
+        return
+    #some old blogger image links return an HTML wrapper page (e.g. the -h size
+    #variant) rather than the image bytes. don't save that as an image; instead
+    #recover the real image url embedded in the wrapper and retry once.
+    if ctype.lower().startswith('text/html') or data[:512].lstrip().lower().startswith((b'<html', b'<!doctype html')):
+        if _depth == 0:
+            inner = BeautifulSoup(data, "lxml").find('img')
+            inner_src = inner.get('src') if inner else None
+            if inner_src:
+                inner_src = upgrade_blogspot_image_url(inner_src)
+                print('Image url returned an HTML wrapper, retrying embedded image: ' + inner_src)
+                return download_image(inner_src, dest_dir, idx, _depth + 1)
+        print('Skipping non-image (HTML) response for image: ' + url)
         return
     base = os.path.basename(urlparse(url).path) or 'image'
     name = '{:02d}_{}'.format(idx, base)
