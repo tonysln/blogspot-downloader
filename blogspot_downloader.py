@@ -31,6 +31,7 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
 download_once = False #if want support interactive, then need to changed this logic
 init_url_once = False
+new_post_dirs = [] #rss feed mode: post dirs freshly created THIS run (skipped/existing ones excluded), for -pp postprocessing
 
 @contextlib.contextmanager
 def setlocale(*args, **kw):
@@ -366,6 +367,7 @@ def download(url, h, d_name, ext):
             #(images embedded as before) plus every image saved separately full-size.
             #post_dir was computed and existence-checked above, before any parsing.
             os.makedirs( post_dir, exist_ok=True )
+            new_post_dirs.append(post_dir) #genuinely new (already-existing posts continue'd above)
 
             if args.save_images: #opt-in via -i, off by default
                 save_post_images(h, post_dir) #parse pre-replacer h for correct urls
@@ -462,6 +464,13 @@ def main():
         if args.feed: url = args.feed
         while url:
             url = download(url, url, d_name, ext)
+        if args.postprocess:
+            #localize images for the just-downloaded posts ONLY (skipped/existing
+            #posts are left untouched) and rebuild the full home menu. imported
+            #lazily so the postprocess<->downloader pair never circular-imports.
+            import postprocess
+            domain_dir = os.path.join(os.getcwd(), d_name)
+            postprocess.process_new_posts(domain_dir, new_post_dirs)
     elif args.single:
         print('Download single year/month in website mode')
         download(url, url, d_name, ext)
@@ -481,6 +490,7 @@ if __name__ == "__main__":
     parser.add_argument('-1', '--one', action='store_true', help='Scrape url of ANY webpage as single pdf(-p) or epub')
     parser.add_argument('-lo', '--log-link-only', dest='log_link_only', action='store_true', help='print link only log for -f feed, temporary workaround to copy into -1, in case -f feed only retrieve summary.')
     parser.add_argument('-i', '--save-images', dest='save_images', action='store_true', help='In rss feed mode, also download every post image full-size into the post subfolder. Off by default.')
+    parser.add_argument('-pp', '--postprocess', dest='postprocess', action='store_true', help='In rss feed mode, after downloading run postprocess.py on the NEW posts only: localize their images and rebuild the home menu. Posts skipped because they already existed are left untouched. Pair with -i to have local images to localize.')
     parser.add_argument('url', nargs='?', help='Blogspot url') #must add nargs='?' or else always need url but -f shouldn't need
     args, remaining  = parser.parse_known_args() #don't use normal parse_args() which can't ignore above url
     

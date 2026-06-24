@@ -263,6 +263,45 @@ def process_domain(domain_dir, dry_run):
         total_posts, total_imgs))
 
 
+def process_new_posts(domain_dir, new_post_dirs, dry_run=False):
+    """Localize images for only the given new post dirs, then rebuild the home menu.
+
+    Unlike process_domain, this never rewrites the index.html of posts outside
+    new_post_dirs (e.g. posts skipped during download because they already
+    existed). The home navigation is still rebuilt from every post in domain_dir
+    so the menu stays complete. Called by the downloader's -pp mode.
+    """
+    domain_dir = os.path.abspath(domain_dir)
+    print('Postprocessing new posts in: ' + domain_dir)
+    new_dirs = sorted({os.path.abspath(d) for d in new_post_dirs})
+    total_imgs = 0
+    processed = 0
+    for post_dir in new_dirs:
+        if not os.path.isfile(os.path.join(post_dir, 'index.html')):
+            continue
+        processed += 1
+        n = localize_post(post_dir, dry_run)
+        total_imgs += n
+        if n:
+            print('  {}{}: {} image link(s) localized'.format(
+                '[dry-run] ' if dry_run else '', os.path.basename(post_dir), n))
+
+    groups = collect_posts(domain_dir)
+    total_in_menu = sum(
+        len(posts)
+        for months in groups.values()
+        for days in months.values()
+        for posts in days.values()
+    )
+    home_path = os.path.join(domain_dir, 'index.html')
+    if not dry_run:
+        with open(home_path, 'w', encoding='utf-8') as f:
+            f.write(render_home(groups))
+    print('  {}{} ({} new posts processed, {} image links localized, {} posts in menu)'.format(
+        '[dry-run] would write ' if dry_run else 'wrote ', home_path,
+        processed, total_imgs, total_in_menu))
+
+
 def looks_like_domain_dir(path):
     """A domain folder has >=1 subdir containing index.html."""
     if not os.path.isdir(path):

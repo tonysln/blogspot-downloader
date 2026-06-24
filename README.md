@@ -73,6 +73,10 @@ pypub/ directory contains my miscellaneous bug fixes and customization from orig
 
     python3 blogspot_downloader.py -lo [blogspot url] # To get list of blogspot urls which can save to /tmp/urls.list manually
     python3 blogspot_downloader.py -1 </tmp/urls.list # Download above urls list. Currently you still need manually delete above output file.
+
+    python3 blogspot_downloader.py -i -pp [blogspot url] # RSS feed mode: save images (-i) then auto-run postprocessing (-pp) on the freshly downloaded posts only.
+
+The -pp flag runs postprocess.py automatically after an RSS feed download. It localizes images and rebuilds the home menu, but only touches posts created in that run; posts skipped because their folder already existed are left as-is. Pair it with -i so there are local images to localize. (You can still run `python3 postprocess.py` standalone to re-process an entire tree.)
     
 ## Details:
 
