@@ -287,7 +287,6 @@ def download(url, h, d_name, ext):
                 if feed_links['rel'] == 'alternate':
                     visit_link = feed_links['href']
             title_raw = tt['title'].strip()
-            title_pad = title_raw + ' '
             if not tt['title']: #epub got problem copy link from text, so epub always shows link
                 tt['title'] = visit_link
                 title_is_link = True
@@ -309,7 +308,7 @@ def download(url, h, d_name, ext):
             if not author:
                 author = tt.get('site_name', '') #https://blog.google/rss/
 
-            h = '<div><small>' + author + ' ' +  t_date + '<br/><i>' + title_pad + '<a style="text-decoration:none;color:black" href="' + visit_link + '">' + tt['title'] + '</a></i></small><br/><br/></div>' + img_css_style
+            h = '<div><small>' + author + ' ' +  t_date + '<br/><i><a style="text-decoration:none;color:black" href="' + visit_link + '">' + tt['title'] + '</a></i></small><br/><br/></div>' + img_css_style
             #<hr style="border-top: 1px solid #000000; background: transparent;">
 
             media_content = ''
