@@ -426,6 +426,10 @@ def process_url(url):
     return url
 
 def main():
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        os.chdir(args.output_dir) #all folder checks/downloads use cwd + relative paths, so this redirects everything
+
     if args.url: url = args.url
     else: url = input('URL: ').strip()
 
@@ -433,7 +437,7 @@ def main():
     
     parsed_uri = urlparse(url)
     netloc = '{uri.netloc}/'.format(uri=parsed_uri)
-    d_name = slugify(netloc)
+    d_name = args.folder_name if args.folder_name else slugify(netloc) #override e.g. if the blog folder was renamed off the netloc
     if not args.one and not os.path.isdir(d_name):
         os.makedirs(d_name)
 
@@ -490,6 +494,8 @@ if __name__ == "__main__":
     parser.add_argument('-lo', '--log-link-only', dest='log_link_only', action='store_true', help='print link only log for -f feed, temporary workaround to copy into -1, in case -f feed only retrieve summary.')
     parser.add_argument('-i', '--save-images', dest='save_images', action='store_true', help='In rss feed mode, also download every post image full-size into the post subfolder. Off by default.')
     parser.add_argument('-pp', '--postprocess', dest='postprocess', action='store_true', help='In rss feed mode, after downloading run postprocess.py on the NEW posts only: localize their images and rebuild the home menu. Posts skipped because they already existed are left untouched. Pair with -i to have local images to localize.')
+    parser.add_argument('-o', '--output-dir', dest='output_dir', help='Base folder to download into / check for existing posts. Created if missing. Default: current directory.')
+    parser.add_argument('-n', '--folder-name', dest='folder_name', help='Override the blog folder name (default: derived from the url, e.g. testblog.com). Use this if the folder was renamed, e.g. -n testblog, so existing posts are still recognized/skipped.')
     parser.add_argument('url', nargs='?', help='Blogspot url') #must add nargs='?' or else always need url but -f shouldn't need
     args, remaining  = parser.parse_known_args() #don't use normal parse_args() which can't ignore above url
     
