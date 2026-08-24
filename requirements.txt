@@ -6,3 +6,5 @@ python-dateutil
 jinja2
 requests
 lxml
+Pillow
+pillow-heif

@@ -1,5 +1,8 @@
 import traceback, shutil, resource
-import sys, os, re, time, datetime, mimetypes
+import sys, os, re, time, datetime
+import hashlib
+import io
+import uuid
 import readline #https://stackoverflow.com/questions/56274748/how-to-navigate-the-text-cursor-in-pythons-input-prompt-with-arrow-keys
 from dateutil import parser as date_parser #need `as` or else conflict name with ArgumentParser
 import unicodedata
@@ -14,14 +17,15 @@ from bs4 import BeautifulSoup, SoupStrainer
 import argparse
 import locale, contextlib
 import tempfile
+from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+
+register_heif_opener()
 
 parser = argparse.ArgumentParser(description='Blogspot Downloader')
 args = ""
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Safari/537.36'
-#prevent image too big and need to scroll
-#only epub, don't put it in pdf, it will causes image not appear
-img_css_style='<style>img { display: block; padding: 5px; max-height: 100%; max-width: 100%;}</style>' 
 
 temp_dir_ext = ".blogspot-downloader.temp"
 sys_tmp_dir = tempfile.gettempdir()
@@ -31,7 +35,6 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
 download_once = False #if want support interactive, then need to changed this logic
 init_url_once = False
-new_post_dirs = [] #rss feed mode: post dirs freshly created THIS run (skipped/existing ones excluded), for -pp postprocessing
 
 @contextlib.contextmanager
 def setlocale(*args, **kw):
@@ -53,7 +56,10 @@ def replacer(s):
 
 def looks_like_image_url(u):
     path = urlparse(u).path.lower()
-    return path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg')) \
+    return path.endswith((
+        '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp',
+        '.heic', '.heif', '.tif', '.tiff', '.avif',
+    )) \
         or ('googleusercontent.com' in u) or ('bp.blogspot.com' in u)
 
 def upgrade_blogspot_image_url(u):
@@ -68,7 +74,41 @@ def upgrade_blogspot_image_url(u):
         u = re.sub(r'=w\d+-h\d+(-[a-z]+)*(?=$|\?|&)', '=s0', u)
     return u
 
-def download_image(url, dest_dir, idx, _depth=0):
+def image_output(data, content_type):
+    """Return (bytes, extension), converting non-PDF-safe images to JPEG."""
+    content_type = content_type.split(';', 1)[0].strip().lower()
+    probe = data[:4096].lstrip().lower()
+    if data.startswith(b'\xff\xd8\xff'):
+        return data, '.jpg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return data, '.png'
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return data, '.gif'
+    if content_type == 'image/svg+xml' or b'<svg' in probe:
+        return data, '.svg'
+
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            source.seek(0)
+            image = ImageOps.exif_transpose(source)
+            if image.mode in ('RGBA', 'LA') or (
+                    image.mode == 'P' and 'transparency' in image.info):
+                rgba = image.convert('RGBA')
+                background = Image.new('RGB', rgba.size, 'white')
+                background.paste(rgba, mask=rgba.getchannel('A'))
+                image = background
+            else:
+                image = image.convert('RGB')
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=90, optimize=True)
+            return output.getvalue(), '.jpg'
+    except Exception as e:
+        print('Failed to decode image (' + repr(e) + ')')
+        return None, None
+
+
+def download_image(url, dest_dir, _depth=0):
+    """Download one image and return its ASCII-safe local filename."""
     if url.startswith('//'): #protocol-relative url
         url = 'https:' + url
     try:
@@ -89,28 +129,27 @@ def download_image(url, dest_dir, idx, _depth=0):
             if inner_src:
                 inner_src = upgrade_blogspot_image_url(inner_src)
                 print('Image url returned an HTML wrapper, retrying embedded image: ' + inner_src)
-                return download_image(inner_src, dest_dir, idx, _depth + 1)
+                return download_image(inner_src, dest_dir, _depth + 1)
         print('Skipping non-image (HTML) response for image: ' + url)
-        return
-    #url path keeps percent-encoding, so brackets etc. arrive as %5B/%5D; decode
-    #them so the saved file uses the same literal characters as the source name
-    #(then drop any path separators a decode might surface, e.g. %2F -> /).
-    base = unquote(os.path.basename(urlparse(url).path)).replace('/', '_') or 'image'
-    name = '{:02d}_{}'.format(idx, base)
-    if not os.path.splitext(name)[1]:
-        name += mimetypes.guess_extension(ctype.split(';')[0].strip()) or '.jpg'
+        return None
+
+    data, extension = image_output(data, ctype)
+    if data is None:
+        print('Skipping unsupported image: ' + url)
+        return None
+    name = uuid.uuid4().hex + extension
     try:
         with open(os.path.join(dest_dir, name), 'wb') as f:
             f.write(data)
     except OSError as e:
         print('Failed to save image: ' + name + ' (' + repr(e) + ')')
+        return None
+    return name
 
 def save_post_images(post_html, dest_dir):
-    #parse the post html (BEFORE replacer() mangles & in urls) and save every
-    #image full-size; prefer the enclosing <a href> link when it is an image
+    """Download post images, rewrite their local references, and return HTML."""
     soup = BeautifulSoup(post_html, "lxml")
-    seen = set()
-    idx = 0
+    saved = {}
     for img in soup.find_all('img'):
         src = img.get('src')
         if not src:
@@ -120,11 +159,100 @@ def save_post_images(post_html, dest_dir):
         if link and link.get('href') and looks_like_image_url(link.get('href')):
             candidate = link.get('href')
         candidate = upgrade_blogspot_image_url(candidate)
-        if candidate in seen:
+        if candidate not in saved:
+            saved[candidate] = download_image(candidate, dest_dir)
+        local_name = saved[candidate]
+        if not local_name:
             continue
-        seen.add(candidate)
-        idx += 1
-        download_image(candidate, dest_dir, idx)
+        img['src'] = local_name
+        #drop source sizing so the stylesheet alone decides how wide images render
+        for attribute in ('srcset', 'data-src', 'data-original', 'data-lazy-src',
+                          'width', 'height', 'style'):
+            img.attrs.pop(attribute, None)
+        picture = img.find_parent('picture')
+        if picture:
+            #unwrap, never decompose: the parser can nest the img inside <source>
+            for source in picture.find_all('source'):
+                source.unwrap()
+        #clicking a photo opens the local file: repoint an existing image link,
+        #or add one, but leave a text link that happens to wrap the image alone
+        if link and (looks_like_image_url(link.get('href') or '')
+                     or not link.get_text(strip=True)):
+            link['href'] = local_name
+        elif not link:
+            (picture or img).wrap(soup.new_tag('a', href=local_name))
+    content = soup.body if soup.body else soup
+    return ''.join(str(child) for child in content.contents)
+
+
+def normalized_title(value):
+    return ' '.join(html.unescape(value or '').split()).casefold()
+
+
+def prepare_summary(summary, title):
+    """Remove a leading feed heading when it repeats the post title."""
+    soup = BeautifulSoup(summary or '', 'lxml')
+    content = soup.body if soup.body else soup
+    first_heading = content.find(re.compile(r'^h[1-6]$'))
+    if first_heading and normalized_title(first_heading.get_text()) == normalized_title(title):
+        first_heading.decompose()
+    return ''.join(str(child) for child in content.contents)
+
+
+def render_post(title, author, post_date, original_url, body_html):
+    safe_title = html.escape(title)
+    safe_author = html.escape(author or '')
+    safe_date = html.escape(post_date or '')
+    safe_url = html.escape(original_url, quote=True)
+    meta = ' '.join(value for value in (safe_author, safe_date) if value)
+    return (
+        '<!DOCTYPE html>\n'
+        '<html><head><meta charset="UTF-8">'
+        '<title>{}</title><link rel="canonical" href="{}">'
+        '<link rel="stylesheet" href="../style.css"></head>'
+        '<body class="post">'
+        '<nav class="backlink"><a href="../index.html">Back</a></nav>'
+        '<article><header>'
+        '<p class="meta">{}</p><h1><a class="permalink" href="{}">{}</a></h1>'
+        '</header><div class="content">{}</div></article></body></html>'
+    ).format(safe_title, safe_url, meta, safe_url, safe_title, body_html)
+
+
+def url_digest(url):
+    return hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
+
+
+def url_slug(url):
+    """ASCII-safe folder name part derived from the post url."""
+    segment = unquote(urlparse(url).path.rstrip('/').rsplit('/', 1)[-1])
+    segment = os.path.splitext(segment)[0]
+    segment = unicodedata.normalize('NFKD', segment).encode('ascii', 'ignore').decode('ascii')
+    segment = re.sub(r'[^A-Za-z0-9]+', '-', segment).lower()[:60].strip('-')
+    return segment or url_digest(url) #urls whose slug is non-latin or empty
+
+
+def post_permalink(post_dir):
+    """Original url recorded in an already downloaded post, if readable."""
+    try:
+        with open(os.path.join(post_dir, 'index.html'), 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f.read(), 'lxml')
+    except OSError:
+        return None
+    permalink = soup.find('a', class_='permalink')
+    return permalink.get('href') if permalink else None
+
+
+def post_dir_for(domain_dir, stamp, url):
+    """Folder for a post: date + url slug, so the same url always maps here."""
+    path = os.path.join(domain_dir, stamp + '_' + url_slug(url))
+    if os.path.isdir(path) and post_permalink(path) not in (None, url):
+        path += '-' + url_digest(url) #two different posts share date and slug
+    return path
+
+
+def ensure_stylesheet(domain_dir):
+    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'style.css')
+    shutil.copyfile(source, os.path.join(domain_dir, 'style.css'))
 
 def rm_tmp_files():
     for root, dirs, files in os.walk(sys_tmp_dir):
@@ -166,7 +294,6 @@ def process_rss_link(url):
 def download(url, h, d_name, ext):
     global download_once
     global init_url_once
-    global img_css_style
 
     #e.g. 'https://diannaoxiaobai.blogspot.com/?action=getTitles&widgetId=BlogArchive1&widgetType=BlogArchive&responseType=js&path=https://diannaoxiaobai.blogspot.com/2018/'
     visit_link = url
@@ -265,7 +392,6 @@ def download(url, h, d_name, ext):
     for tt in t:
         count+=1
         title_raw = ''
-        title_is_link = False
         if not args.all:
             #e.g. parser.parse('2012-12-22T08:36:46.043-08:00').strftime('%B %d, %Y, %H:%M %p')
             h = ''
@@ -282,34 +408,22 @@ def download(url, h, d_name, ext):
             try: #sortable, filesystem-safe stamp for the per-post subfolder name
                 post_dt_str = date_parser.parse(post_date).strftime('%Y-%m-%d_%H%M%S')
             except (ValueError, TypeError):
-                post_dt_str = str(int(time.time()))
+                post_dt_str = datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')
             for feed_links in tt['links']:
                 if feed_links['rel'] == 'alternate':
                     visit_link = feed_links['href']
-            title_raw = tt['title'].strip()
-            if not tt['title']: #epub got problem copy link from text, so epub always shows link
-                tt['title'] = visit_link
-                title_is_link = True
-
-            #compute the would-be post folder and skip BEFORE any html parsing/building,
-            #so an already-downloaded post is never re-fetched nor duplicated. mirrors the
-            #title->slug logic below (lines title_is_link / replacer / slugify).
-            early_title = '/'.join(tt['title'].split('/')[-3:]) if title_is_link else tt['title']
-            early_slug = slugify(replacer(early_title)).strip()[:120]
-            post_dir = os.path.join( os.getcwd(), d_name, (post_dt_str + '_' + early_slug).strip() )
+            title = html.unescape(tt.get('title', '')).strip() or visit_link
+            title_raw = title
+            domain_dir = os.path.join(os.getcwd(), d_name)
+            post_dir = post_dir_for(domain_dir, post_dt_str, visit_link)
             print(post_dir)
-            if os.path.exists( post_dir ): #already downloaded
-                print('Folder already exists, skipping post: ' + post_dir)
+            if os.path.isdir(post_dir):
+                print('Post already exists, skipping: ' + visit_link)
                 continue
-
-            img_css_style = ''
 
             author = tt.get('author_detail', {}).get('name')
             if not author:
                 author = tt.get('site_name', '') #https://blog.google/rss/
-
-            h = '<div><small>' + author + ' ' +  t_date + '<br/><i><a style="text-decoration:none;color:black" href="' + visit_link + '">' + tt['title'] + '</a></i></small><br/><br/></div>' + img_css_style
-            #<hr style="border-top: 1px solid #000000; background: transparent;">
 
             media_content = ''
             try:
@@ -317,14 +431,13 @@ def download(url, h, d_name, ext):
                     for tm in tt['media_content']:
                        #pitfall: python 3 dict no has_key() attr
                         if ('medium' in tm) and (tm['medium'] == 'image') and 'url' in tm:
-                            media_content += '<img src="' + tm['url'] + '" >'
+                            media_content += '<img src="{}">'.format(
+                                html.escape(tm['url'], quote=True))
             except Exception as e:
                 print(e)
                 print('parse media error')
 
-            h = '<head><meta charset="UTF-8"></head><body><div align="left">' + h + tt['summary'].replace('<div class="separator"', '<div class="separator" align="left" ') + media_content + '</div></body>'
-
-            title = tt['title']
+            body_html = prepare_summary(tt.get('summary', ''), title) + media_content
             t_url = visit_link
         else:
             field = tt.split("'")
@@ -340,13 +453,9 @@ def download(url, h, d_name, ext):
 
         print('Download html as PDF, please be patient...' + str(count) + '/' + str(len(t)))
 
-        if title_is_link: #else just leave slash with empty
-            title = '/'.join(title.split('/')[-3:])
-
-        title = replacer(title)
-        slug = slugify(title).strip()[:120] #cap to stay within filename limits
-
         if args.all:
+            title = replacer(title)
+            slug = slugify(title).strip()[:120] #cap to stay within filename limits
             fname = os.path.join( d_name, slug )
             fpath = os.path.join( os.getcwd(), fname )
             check_path = os.path.join( fpath + ext )
@@ -362,23 +471,24 @@ def download(url, h, d_name, ext):
             except IOError as ioe:
                 print("pdfkit IOError")
         else:
-            #each post gets its own date/time-stamped subfolder, holding the PDF
-            #(images embedded as before) plus every image saved separately full-size.
-            #post_dir was computed and existence-checked above, before any parsing.
             os.makedirs( post_dir, exist_ok=True )
-            new_post_dirs.append(post_dir) #genuinely new (already-existing posts continue'd above)
 
             if args.save_images: #opt-in via -i, off by default
-                save_post_images(h, post_dir) #parse pre-replacer h for correct urls
+                body_html = save_post_images(body_html, post_dir)
 
-            post_html = replacer(h) #same html that goes into the pdf
-            with open(os.path.join( post_dir, 'index.html' ), 'w', encoding='utf-8') as f:
+            post_html = render_post(title, author, t_date, visit_link, body_html)
+            index_path = os.path.join(post_dir, 'index.html')
+            with open(index_path, 'w', encoding='utf-8') as f:
                 f.write(post_html)
 
-            fpath = os.path.join( post_dir, slug + ext )
+            if args.no_pdf:
+                continue
+            fpath = os.path.join(post_dir, 'post' + ext)
             print("file path: " + fpath)
             try:
-                pdfkit.from_string(post_html, fpath)
+                pdfkit.from_file(
+                    index_path, fpath,
+                    options={'enable-local-file-access': None})
             except IOError as ioe:
                 print('Exception IOError: ' + repr(ioe))
     return url #return value used for rss feed mode only
@@ -440,6 +550,8 @@ def main():
     d_name = args.folder_name if args.folder_name else slugify(netloc) #override e.g. if the blog folder was renamed off the netloc
     if not args.one and not os.path.isdir(d_name):
         os.makedirs(d_name)
+    if not args.one and not args.all:
+        ensure_stylesheet(os.path.join(os.getcwd(), d_name))
 
     ext = '.pdf'
     
@@ -468,12 +580,9 @@ def main():
         while url:
             url = download(url, url, d_name, ext)
         if args.postprocess:
-            #localize images for the just-downloaded posts ONLY (skipped/existing
-            #posts are left untouched) and rebuild the full home menu. imported
-            #lazily so the postprocess<->downloader pair never circular-imports.
             import postprocess
             domain_dir = os.path.join(os.getcwd(), d_name)
-            postprocess.process_new_posts(domain_dir, new_post_dirs)
+            postprocess.process_domain(domain_dir, False)
     elif args.single:
         print('Download single year/month in website mode')
         download(url, url, d_name, ext)
@@ -492,8 +601,9 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--feed', help='Direct pass full rss feed url. e.g. python blogspot_downloader.py http://www.ulduzsoft.com/feed/ -f http://www.ulduzsoft.com/feed/. Note that it may not able to get previous rss page in non-blogspot site.') #got case not return code, e.g. http://zoczus.blogspot.com/2015/04/plupload-same-origin-method-execution.html , use -a in this case
     parser.add_argument('-1', '--one', action='store_true', help='Scrape url of ANY webpage as single pdf(-p) or epub')
     parser.add_argument('-lo', '--log-link-only', dest='log_link_only', action='store_true', help='print link only log for -f feed, temporary workaround to copy into -1, in case -f feed only retrieve summary.')
-    parser.add_argument('-i', '--save-images', dest='save_images', action='store_true', help='In rss feed mode, also download every post image full-size into the post subfolder. Off by default.')
-    parser.add_argument('-pp', '--postprocess', dest='postprocess', action='store_true', help='In rss feed mode, after downloading run postprocess.py on the NEW posts only: localize their images and rebuild the home menu. Posts skipped because they already existed are left untouched. Pair with -i to have local images to localize.')
+    parser.add_argument('-i', '--save-images', dest='save_images', action='store_true', help='In rss feed mode, download post images with UUID names, convert unsupported formats to JPEG, and use local links. Off by default.')
+    parser.add_argument('--no-pdf', dest='no_pdf', action='store_true', help='In rss feed mode, skip writing post.pdf. HTML, images, and the home menu are still created.')
+    parser.add_argument('-pp', '--postprocess', dest='postprocess', action='store_true', help='In rss feed mode, rebuild the home menu after downloading.')
     parser.add_argument('-o', '--output-dir', dest='output_dir', help='Base folder to download into / check for existing posts. Created if missing. Default: current directory.')
     parser.add_argument('-n', '--folder-name', dest='folder_name', help='Override the blog folder name (default: derived from the url, e.g. testblog.com). Use this if the folder was renamed, e.g. -n testblog, so existing posts are still recognized/skipped.')
     parser.add_argument('url', nargs='?', help='Blogspot url') #must add nargs='?' or else always need url but -f shouldn't need

@@ -2,105 +2,30 @@
 
 import argparse
 import datetime
-import glob
 import html
 import os
 import re
+import shutil
 import sys
 
 from bs4 import BeautifulSoup
 
-# reuse the downloader's pure url helpers (importing only runs setrlimit; the
-# arg parsing lives under its __main__ guard, so this has no side effects).
-from blogspot_downloader import looks_like_image_url, upgrade_blogspot_image_url
-
-# post subfolder name produced by the downloader: YYYY-MM-DD_HHMMSS_slug
-POST_DIR_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})_(.*)$')
-
-
-def iter_image_candidates(soup):
-    """Replay save_post_images' iteration over <img> tags.
-
-    Yields (img_tag, candidate_url, idx) in document order. candidate_url is the
-    deduped, size-upgraded url the downloader would have fetched; idx is its
-    1-based saved-file number. Repeated candidates reuse the first idx (the
-    downloader only saved them once) and so still get rewritten to the local
-    file.
-    """
-    seen = {}
-    idx = 0
-    for img in soup.find_all('img'):
-        src = img.get('src')
-        if not src:
-            continue
-        candidate = src
-        link = img.find_parent('a')
-        if link and link.get('href') and looks_like_image_url(link.get('href')):
-            candidate = link.get('href')
-        candidate = upgrade_blogspot_image_url(candidate)
-        if candidate in seen:
-            yield img, candidate, seen[candidate]
-            continue
-        idx += 1
-        seen[candidate] = idx
-        yield img, candidate, idx
-
-
-def local_file_for(idx, post_dir):
-    """Return the saved image filename for the idx-th image, or None.
-
-    Matches by the NN_ prefix so it is robust to download_image's extension
-    guessing / html-wrapper renames. Skips home.html and the post pdf.
-    """
-    matches = sorted(glob.glob(os.path.join(post_dir, '{:02d}_*'.format(idx))))
-    for path in matches:
-        if os.path.isfile(path):
-            return os.path.basename(path)
-    return None
-
-
-def localize_post(post_dir, dry_run):
-    """Rewrite index.html in post_dir to reference local image files.
-
-    Returns the number of <img> tags repointed to local files.
-    """
-    index_path = os.path.join(post_dir, 'index.html')
-    with open(index_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f.read(), 'lxml')
-
-    local_for_idx = {}
-    changed = 0
-    for img, candidate, idx in iter_image_candidates(soup):
-        if idx not in local_for_idx:
-            local_for_idx[idx] = local_file_for(idx, post_dir)
-        local = local_for_idx[idx]
-        if not local:
-            continue  # download failed/skipped: leave this image remote
-        if img.get('src') != local:
-            img['src'] = local
-            changed += 1
-        link = img.find_parent('a')
-        if link and link.get('href') and looks_like_image_url(link.get('href')):
-            link['href'] = local
-
-    if changed and not dry_run:
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.write(str(soup))
-    return changed
+# post subfolder name: YYYY-MM-DD_HHMMSS_<slug from the original post url>
+POST_DIR_RE = re.compile(
+    r'^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})_([a-z0-9][a-z0-9-]*)$')
 
 
 def post_title(post_dir, fallback):
-    """Best-effort real post title from index.html (the <i><a> header text)."""
+    """Return the visible post title from index.html."""
     index_path = os.path.join(post_dir, 'index.html')
     try:
         with open(index_path, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f.read(), 'lxml')
     except OSError:
         return fallback
-    italic = soup.find('i')
-    if italic:
-        link = italic.find('a')
-        text = (link.get_text() if link else italic.get_text()).strip()
+    heading = soup.find('h1')
+    if heading:
+        text = heading.get_text().strip()
         if text:
             return text
     return fallback
@@ -188,14 +113,10 @@ def render_home(groups):
     """
     out = [
         '<!DOCTYPE html>',
-        '<html><head><meta charset="UTF-8"><title>Posts</title>',
-        '<style>body{font-family:sans-serif;max-width:50em;margin:2em auto;padding:0 1em}'
-        'h2{margin:1em 0 .2em}h3{margin:.6em 0 .1em;color:#444}'
-        'ul{margin:.2em 0 .6em;list-style:none;padding-left:1em}'
-        'li{margin:.15em 0}.day{color:#888;margin-right:.5em}'
-        '#sort-toggle{cursor:pointer}</style>',
-        '</head><body>',
-        '<h1>Posts</h1>',
+        '<html><head><meta charset="UTF-8"><title>Posts</title>'
+        '<link rel="stylesheet" href="style.css"></head>',
+        '<body class="home"><main>',
+        '<header><h1>Posts</h1></header>',
         '<small><a href="#" id="sort-toggle">Sort: Ascending</a></small>',
         '<div id="posts">',
     ]
@@ -231,63 +152,14 @@ def render_home(groups):
 
     out.append('</div>')
     out.append(SORT_SCRIPT)
-    out.append('</body></html>')
+    out.append('</main></body></html>')
     return '\n'.join(out)
 
 
-def process_domain(domain_dir, dry_run):
+def write_home(domain_dir, dry_run):
     domain_dir = os.path.abspath(domain_dir)
-    print('Domain: ' + domain_dir)
-    total_posts = 0
-    total_imgs = 0
-    for name in sorted(os.listdir(domain_dir)):
-        post_dir = os.path.join(domain_dir, name)
-        if not os.path.isdir(post_dir):
-            continue
-        if not os.path.isfile(os.path.join(post_dir, 'index.html')):
-            continue
-        total_posts += 1
-        n = localize_post(post_dir, dry_run)
-        total_imgs += n
-        if n:
-            print('  {}{}: {} image link(s) localized'.format(
-                '[dry-run] ' if dry_run else '', name, n))
-
     groups = collect_posts(domain_dir)
-    home_path = os.path.join(domain_dir, 'index.html')
-    if not dry_run:
-        with open(home_path, 'w', encoding='utf-8') as f:
-            f.write(render_home(groups))
-    print('  {}{} ({} posts, {} image links localized)'.format(
-        '[dry-run] would write ' if dry_run else 'wrote ', home_path,
-        total_posts, total_imgs))
-
-
-def process_new_posts(domain_dir, new_post_dirs, dry_run=False):
-    """Localize images for only the given new post dirs, then rebuild the home menu.
-
-    Unlike process_domain, this never rewrites the index.html of posts outside
-    new_post_dirs (e.g. posts skipped during download because they already
-    existed). The home navigation is still rebuilt from every post in domain_dir
-    so the menu stays complete. Called by the downloader's -pp mode.
-    """
-    domain_dir = os.path.abspath(domain_dir)
-    print('Postprocessing new posts in: ' + domain_dir)
-    new_dirs = sorted({os.path.abspath(d) for d in new_post_dirs})
-    total_imgs = 0
-    processed = 0
-    for post_dir in new_dirs:
-        if not os.path.isfile(os.path.join(post_dir, 'index.html')):
-            continue
-        processed += 1
-        n = localize_post(post_dir, dry_run)
-        total_imgs += n
-        if n:
-            print('  {}{}: {} image link(s) localized'.format(
-                '[dry-run] ' if dry_run else '', os.path.basename(post_dir), n))
-
-    groups = collect_posts(domain_dir)
-    total_in_menu = sum(
+    total_posts = sum(
         len(posts)
         for months in groups.values()
         for days in months.values()
@@ -297,9 +169,17 @@ def process_new_posts(domain_dir, new_post_dirs, dry_run=False):
     if not dry_run:
         with open(home_path, 'w', encoding='utf-8') as f:
             f.write(render_home(groups))
-    print('  {}{} ({} new posts processed, {} image links localized, {} posts in menu)'.format(
+        css_source = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'style.css')
+        shutil.copyfile(css_source, os.path.join(domain_dir, 'style.css'))
+    print('  {}{} ({} posts)'.format(
         '[dry-run] would write ' if dry_run else 'wrote ', home_path,
-        processed, total_imgs, total_in_menu))
+        total_posts))
+
+
+def process_domain(domain_dir, dry_run):
+    print('Domain: ' + os.path.abspath(domain_dir))
+    write_home(domain_dir, dry_run)
 
 
 def looks_like_domain_dir(path):
@@ -314,7 +194,7 @@ def looks_like_domain_dir(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Localize images + build home nav for a downloaded blogspot tree.')
+    ap = argparse.ArgumentParser(description='Build home navigation for a downloaded blogspot tree.')
     ap.add_argument('folders', nargs='*', help='Domain folder(s) to process. Default: scan current dir.')
     ap.add_argument('--dry-run', action='store_true', help='Report changes without writing.')
     args = ap.parse_args()
